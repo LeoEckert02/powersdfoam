@@ -8,7 +8,7 @@ interpenetration_weight: 1e-4
 
 # Dataset parameters
 dataset: "colmap"
-data_path: "data/mipnerf360"
+data_path: "/storage/user/eckertle/360_v2"
 scene: "bonsai"
 alpha_format_on_disk: "premultiplied"
 downsample: [4, 2]
@@ -19,11 +19,12 @@ eval: true
 # Model parameters
 init_type: "sfm"
 init_points: 100_000
-final_points: 500_000
+final_points: 1_200_000
 bkgd_color: [0.0, 0.0, 0.0]
 render_objective: "volume"
 sv_dof: 8
 num_texel_sites: 8
+use_metric3d: true
 
 # Optimization parameters
 points_lr_init: 1e-3
@@ -42,3 +43,20 @@ texel_sv_rgb_lr_init: 5e-3
 texel_sv_rgb_lr_final: 5e-4
 texel_height_lr_init: 5e-3
 texel_height_lr_final: 5e-4
+# SDF parameters (SDFoam integration)
+use_sdf: true
+sdf_hidden_dim: 256
+sdf_n_layers: 8
+sdf_multires: 6
+sdf_bias: 0.5
+sdf_variance_init: 0.3
+sdf_density_scale: 1.0
+eikonal_weight: 0.01
+sdf_bbox_samples: 8192
+sdf_surface_samples: 2048
+sdf_surface_sample_from: 7000
+sdf_normal_weight: 0.05
+sdf_lr_init: 5e-4
+sdf_lr_final: 5e-5
+variance_lr_init: 5e-3
+variance_lr_final: 5e-6

@@ -4,7 +4,7 @@ import torch
 from tqdm import tqdm
 import open3d as o3d
 
-from .scene import PowerfoamScene
+from .scene import PowerSDFoamScene
 from .camera import TorchCamera
 from data_loader import DataHandler
 
@@ -25,7 +25,7 @@ class MeshExtractor:
         self.data = DataHandler(args)
         self.data.reload("test", downsample=args.downsample[-1])
 
-        self.model = PowerfoamScene(args)
+        self.model = PowerSDFoamScene(args)
         self.model.initialize_from_dataset(self.data, device="cuda")
         self.model.load_pt(f"{self.checkpoint}/model.pt")
     

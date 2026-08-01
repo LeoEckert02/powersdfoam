@@ -15,10 +15,10 @@ from torch.utils.tensorboard import SummaryWriter
 
 from configs import *
 from data_loader import DataHandler
-from powerfoam.scene import PowerfoamScene
-from powerfoam.geometry import normals_from_depth, depth_bilateral_filter
-from powerfoam.scheduling import get_exp_scheduler, get_cosine_scheduler
-from powerfoam.metrics import psnr, ssim, ssim_eval, lpips_eval
+from powersdfoam.scene import PowerSDFoamScene
+from powersdfoam.geometry import normals_from_depth, depth_bilateral_filter
+from powersdfoam.scheduling import get_exp_scheduler, get_cosine_scheduler
+from powersdfoam.metrics import psnr, ssim, ssim_eval, lpips_eval
 
 torch.manual_seed(42)
 np.random.seed(42)
@@ -61,16 +61,33 @@ def train(args):
     print("Loaded dataset")
 
     # Setting up model
-    model = PowerfoamScene(args)
+    model = PowerSDFoamScene(args)
     model.initialize_from_dataset(train_data_handler, device="cuda")
     model.declare_optimizers(args, args.iterations)
     model.sort_points()
     args.init_points = model.points.shape[0]
 
+    # Scene bounds for SDF regularization (Eikonal sampling and the
+    # near-surface band width), computed from the initial sites and the
+    # camera centers as in SDFoam.
+    if args.use_sdf:
+        with torch.no_grad():
+            cam_centers = torch.stack(
+                [cam.eye for cam in train_data_handler.cameras], dim=0
+            ).to(model.device)
+            scene_pts = torch.cat(
+                [model.points.detach().float(), cam_centers.float()], dim=0
+            )
+            sdf_bbox_min = scene_pts.min(dim=0).values
+            sdf_bbox_max = scene_pts.max(dim=0).values
+            sdf_bbox_diag = (sdf_bbox_max - sdf_bbox_min).norm().item()
+        tau_surface = 0.02 * sdf_bbox_diag
+        surface_jitter_sigma = 0.005 * sdf_bbox_diag
+
     viewer = None
     viewer_lock = nullcontext()
     if args.viewer:
-        from powerfoam.viewer import Viewer
+        from powersdfoam.viewer import Viewer
 
         viewer = Viewer(
             model, train_data_handler.cameras[0], world_up=train_data_handler.viewer_up
@@ -278,12 +295,72 @@ def train(args):
                     w_interpenetration = interpenetration_loss_scheduler(i)
                     torch.cuda.nvtx.range_pop()  # Interpenetration
 
+                    torch.cuda.nvtx.range_push("SDF Regularization")
+                    eikonal_loss = torch.zeros((), device=model.device)
+                    sdf_normal_loss = torch.zeros((), device=model.device)
+                    if args.use_sdf:
+                        # Eikonal samples: sites + uniform box samples
+                        # (+ jittered near-surface samples later in training)
+                        x_primal = model.points.float()
+                        x_bbox = sdf_bbox_min + torch.rand(
+                            args.sdf_bbox_samples, 3, device=model.device
+                        ) * (sdf_bbox_max - sdf_bbox_min)
+                        x_parts = [x_primal, x_bbox]
+
+                        with torch.no_grad():
+                            sdf_sites = model.get_sdf()
+                            near_surface = sdf_sites.abs() < tau_surface
+
+                        if i >= args.sdf_surface_sample_from and near_surface.any():
+                            surf_idx = torch.nonzero(near_surface, as_tuple=False)[
+                                :, 0
+                            ]
+                            jitter_idx = surf_idx[
+                                torch.randint(
+                                    0,
+                                    surf_idx.numel(),
+                                    (args.sdf_surface_samples,),
+                                    device=model.device,
+                                )
+                            ]
+                            x_surface = model.points.detach().float()[
+                                jitter_idx
+                            ] + surface_jitter_sigma * torch.randn(
+                                args.sdf_surface_samples, 3, device=model.device
+                            )
+                            x_surface = torch.clamp(
+                                x_surface, sdf_bbox_min, sdf_bbox_max
+                            )
+                            x_parts.append(x_surface)
+
+                        x_eik = torch.cat(x_parts, dim=0)
+                        sdf_grads = model.sdf_network.gradient(x_eik)
+                        eikonal_loss = model.sdf_network.eikonal_loss(sdf_grads)
+
+                        # Align dipole normals with the SDF gradient for
+                        # cells near the zero level set, coupling the
+                        # oriented-point surface model to the SDF.
+                        if near_surface.any():
+                            n_sdf = F.normalize(
+                                sdf_grads[: x_primal.shape[0]][near_surface],
+                                dim=-1,
+                            )
+                            dipole_normals = model.get_normals().float()[
+                                near_surface
+                            ]
+                            sdf_normal_loss = (
+                                1 - (n_sdf * dipole_normals).sum(dim=-1)
+                            ).mean()
+                    torch.cuda.nvtx.range_pop()  # SDF Regularization
+
                     loss = (
                         rgb_loss
                         + w_ssim * ssim_loss
                         + w_normal * normal_loss
                         + w_contrib * contrib_loss
                         + w_interpenetration * interpenetration_loss
+                        + args.eikonal_weight * eikonal_loss
+                        + args.sdf_normal_weight * sdf_normal_loss
                     )
 
                     torch.cuda.nvtx.range_pop()  # Losses
@@ -315,6 +392,16 @@ def train(args):
                     writer.add_scalar(
                         "train/interpenetration_loss", interpenetration_loss.item(), i
                     )
+                    if args.use_sdf:
+                        writer.add_scalar(
+                            "train/eikonal_loss", eikonal_loss.item(), i
+                        )
+                        writer.add_scalar(
+                            "train/sdf_normal_loss", sdf_normal_loss.item(), i
+                        )
+                        writer.add_scalar(
+                            "train/inv_s", model.get_inv_s().item(), i
+                        )
 
                     num_points = model.points.shape[0]
                     writer.add_scalar("test/num_points", num_points, i)

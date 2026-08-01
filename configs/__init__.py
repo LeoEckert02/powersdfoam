@@ -104,6 +104,28 @@ class Params:
     sv_dof: int
     num_texel_sites: int
 
+    # SDF parameters (SDFoam integration).  When ``use_sdf`` is enabled,
+    # per-cell densities are derived from a global neural SDF evaluated at
+    # the power sites (NeuS-style logistic density with learnable
+    # sharpness) instead of the free per-cell density parameter.
+    use_sdf: bool = False
+    sdf_hidden_dim: int = 256
+    sdf_n_layers: int = 8
+    sdf_multires: int = 6
+    sdf_bias: float = 0.5
+    sdf_variance_init: float = 0.3
+    sdf_density_scale: float = 1.0
+    # Eikonal regularization: weight and sample counts (uniform box samples
+    # plus jittered near-surface samples activated after
+    # ``sdf_surface_sample_from`` iterations).
+    eikonal_weight: float = 0.01
+    sdf_bbox_samples: int = 8192
+    sdf_surface_samples: int = 2048
+    sdf_surface_sample_from: int = 7000
+    # Alignment between the dipole normals and the SDF gradient direction
+    # for cells near the zero level set.
+    sdf_normal_weight: float = 0.05
+
     # Optimizer parameters
     points_lr_init: float
     points_lr_final: float
@@ -121,3 +143,7 @@ class Params:
     texel_sv_rgb_lr_final: float
     texel_height_lr_init: float
     texel_height_lr_final: float
+    sdf_lr_init: float = 5e-4
+    sdf_lr_final: float = 5e-5
+    variance_lr_init: float = 5e-3
+    variance_lr_final: float = 5e-6

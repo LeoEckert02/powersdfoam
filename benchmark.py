@@ -13,7 +13,7 @@ import warp as wp
 
 from configs import *
 from data_loader import DataHandler
-from powerfoam.scene import PowerfoamScene
+from powersdfoam.scene import PowerSDFoamScene, NETWORK_PARAM_GROUPS
 
 
 
@@ -181,6 +181,7 @@ def get_steiner_points(points, radii, cameras):
 
 def add_steiner_points(model, new_points, new_radii, attr_dtype):
     num_new_samples = new_points.shape[0]
+    num_existing = model.points.shape[0]
     new_params = {
         "points": new_points,
         "radii": new_radii,
@@ -216,6 +217,8 @@ def add_steiner_points(model, new_points, new_radii, attr_dtype):
     }
     optimizable_tensors = {}
     for group in model.optimizer.param_groups:
+        if group["name"] in NETWORK_PARAM_GROUPS:
+            continue
         stored_state = model.optimizer.state.get(group["params"][0], None)
         if stored_state is not None:
             new_stored_state = torch.zeros_like(stored_state[:num_new_samples])
@@ -251,6 +254,24 @@ def add_steiner_points(model, new_points, new_radii, attr_dtype):
     model.texel_sv_rgb = optimizable_tensors["texel_sv_rgb"]
     model.texel_height = optimizable_tensors["texel_height"]
 
+    # Steiner points are invisible scaffolding: they only exist to give the ray
+    # tracer valid adjacency, and are never seen by the rasterizer. With use_sdf
+    # the raw density (-10) is ignored in favor of the SDF-derived density, so we
+    # mark them here and force their density to 0 at render time (see get_density
+    # call sites) to keep the two renderers comparing the same visible scene.
+    existing_mask = getattr(model, "steiner_mask", None)
+    if existing_mask is None:
+        existing_mask = torch.zeros(
+            num_existing, dtype=torch.bool, device=model.device
+        )
+    model.steiner_mask = torch.cat(
+        [
+            existing_mask,
+            torch.ones(num_new_samples, dtype=torch.bool, device=model.device),
+        ],
+        dim=0,
+    )
+
 
 def test(args, config_path, render_type):
     wp.init()
@@ -264,7 +285,7 @@ def test(args, config_path, render_type):
     test_data_handler.reload("test", downsample=args.downsample[-1])
 
     # Setting up model
-    model = PowerfoamScene(args, attr_dtype="half")
+    model = PowerSDFoamScene(args, attr_dtype="half")
     model.initialize_from_dataset(test_data_handler, device="cuda")
     model.load_pt(f"{checkpoint}/model.pt")
     model.declare_optimizers(args, args.iterations)
@@ -284,6 +305,11 @@ def test(args, config_path, render_type):
                 model.tscalar,
             )
             model.sort_points()
+            print(
+                f"Added {steiner_points.shape[0]:,} Steiner points "
+                f"(total {model.points.shape[0]:,} points)",
+                flush=True,
+            )
 
     with torch.no_grad():
         points = model.points
@@ -302,6 +328,9 @@ def test(args, config_path, render_type):
         adjacency_diff = adjacency_diff.to(torch.float16)
 
         density = model.get_density()
+        if getattr(model, "steiner_mask", None) is not None:
+            density = density.clone()
+            density[model.steiner_mask] = 0
         normals = model.get_normals()
         tangents, bitangent = model.get_tangents()
         offsets = model.texel_sites * radii[:, None, None]
@@ -324,10 +353,11 @@ def test(args, config_path, render_type):
             start_point_idxs.append(int(torch.argmin(dists**2 - radii**2)))
 
         # Warmup
-        print("Warming up...")
+        print(f"Warming up ({n_frames} frames)...", flush=True)
         torch.cuda.synchronize()
 
         for i in range(n_frames):
+            print(f"  warmup frame {i + 1}/{n_frames}", flush=True)
             camera = cameras[i]
             start_point_idx = start_point_idxs[i]
             texel_rgb = model.sv.forward(
@@ -374,8 +404,12 @@ def test(args, config_path, render_type):
         torch.cuda.synchronize()
 
         # Actual benchmarking
-        print("Benchmarking...")
         n_reps = 5
+        print(
+            f"Benchmarking ({n_reps} reps x {n_frames} frames, silent — "
+            f"timed region)...",
+            flush=True,
+        )
         output = torch.empty(
             (n_frames, cameras[0].height, cameras[0].width, 3), device=model.device
         )

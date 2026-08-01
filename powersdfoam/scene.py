@@ -16,6 +16,11 @@ from .rasterize import Rasterizer
 from .raytrace import RayTracer
 from .color_fn import SphericalVoronoi
 from .scheduling import get_cosine_scheduler
+from .sdf import SDFNetwork, SingleVarianceNetwork, sdf_to_density
+
+# Optimizer param groups holding network weights (not per-cell tensors).
+# These must be skipped by any operation that permutes/resamples cells.
+NETWORK_PARAM_GROUPS = ("sdf_network", "inv_s")
 
 
 def init_points_sfm(data_handler, num_points):
@@ -62,11 +67,12 @@ def init_points_unbounded(data_handler, num_points):
     return points
 
 
-class PowerfoamScene(nn.Module):
+class PowerSDFoamScene(nn.Module):
 
     def __init__(self, args, attr_dtype="float"):
         super().__init__()
         self.args = args
+        self.use_sdf = bool(getattr(args, "use_sdf", False))
         if attr_dtype == "float":
             self.attr_dtype = "float"
             self.tscalar = torch.float32
@@ -131,6 +137,47 @@ class PowerfoamScene(nn.Module):
             torch.ones(self.points.shape[0], dtype=self.tscalar, device=device) * 1e-1
         )
         self.density = nn.Parameter(density)
+
+        if self.use_sdf:
+            # Global SDF network (SDFoam): per-cell densities are derived
+            # from the SDF evaluated at the power sites, so photometric
+            # gradients from both the rasterizer and the ray tracer flow
+            # into the SDF.  Geometric init is centered on the point cloud.
+            #
+            # The network normalizes its input space by `scale`. Without
+            # normalization, a large-coordinate scene (unbounded 360 captures
+            # span tens of units) aliases the positional encoding and collapses
+            # the SDF to a degenerate near-constant field (the eikonal
+            # constraint |grad f|=1 cannot hold at that scale). We map the
+            # point cloud to ~unit radius so DTU-style thresholds transfer and
+            # the geometric-init sphere (bias) lands in a sane place. Override
+            # with `sdf_scale` in the config if needed.
+            with torch.no_grad():
+                pc = init_points.detach().float()
+                pc_radius = (pc - pc.mean(dim=0)).norm(dim=1).quantile(0.95)
+            sdf_scale = float(getattr(self.args, "sdf_scale", 0.0)) or (
+                1.0 / float(pc_radius)
+            )
+            print(
+                f"[sdf] point-cloud radius={float(pc_radius):.3f}, "
+                f"input scale={sdf_scale:.5f}"
+            )
+            self.sdf_network = SDFNetwork(
+                d_in=3,
+                d_out=1,
+                d_hidden=self.args.sdf_hidden_dim,
+                n_layers=self.args.sdf_n_layers,
+                skip_in=(self.args.sdf_n_layers // 2,),
+                multires=self.args.sdf_multires,
+                bias=self.args.sdf_bias,
+                scale=sdf_scale,
+                geometric_init=True,
+                weight_norm=True,
+                point_cloud=init_points,
+            ).to(device)
+            self.variance_net = SingleVarianceNetwork(
+                init_val=self.args.sdf_variance_init
+            ).to(device)
 
         texel_sites = (
             torch.randn(
@@ -199,6 +246,8 @@ class PowerfoamScene(nn.Module):
 
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
+            if group["name"] in NETWORK_PARAM_GROUPS:
+                continue
             if "env" not in group["name"]:
                 stored_state = self.optimizer.state.get(group["params"][0], None)
                 if stored_state is not None:
@@ -231,12 +280,35 @@ class PowerfoamScene(nn.Module):
             self.contrib_ema = self.contrib_ema[permutation]
         if hasattr(self, "point_error_ema"):
             self.point_error_ema = self.point_error_ema[permutation]
+        if getattr(self, "steiner_mask", None) is not None:
+            self.steiner_mask = self.steiner_mask[permutation]
 
     def rebuild_adjacency(self):
         self.aabb_tree.update(self.points, self.get_radii())
         self.adjacency, self.adjacency_offsets = self.aabb_tree.build_cech_complex()
 
+    def get_inv_s(self):
+        return self.variance_net()
+
+    def get_sdf(self, x=None):
+        """SDF values at ``x`` (defaults to the power sites), shape (N,)."""
+        if x is None:
+            x = self.points
+        return self.sdf_network.sdf(x.float()).squeeze(-1)
+
+    def get_sdf_gradient(self, x=None):
+        """SDF spatial gradient at ``x`` (defaults to the power sites)."""
+        if x is None:
+            x = self.points
+        return self.sdf_network.gradient(x.float())
+
     def get_density(self):
+        if self.use_sdf:
+            sdf = self.get_sdf()
+            density = sdf_to_density(
+                sdf, self.get_inv_s(), self.args.sdf_density_scale
+            )
+            return density.to(self.tscalar)
         return F.softplus(self.density, beta=100)
 
     def get_normals(self):
@@ -524,6 +596,21 @@ class PowerfoamScene(nn.Module):
                 "name": "texel_height",
             },
         ]
+        if self.use_sdf:
+            params.append(
+                {
+                    "params": self.sdf_network.parameters(),
+                    "lr": args.sdf_lr_init,
+                    "name": "sdf_network",
+                }
+            )
+            params.append(
+                {
+                    "params": self.variance_net.parameters(),
+                    "lr": args.variance_lr_init,
+                    "name": "inv_s",
+                }
+            )
 
         self.optimizer = torch.optim.Adam(params, eps=1e-15)
         self.points_scheduler = get_cosine_scheduler(
@@ -569,6 +656,17 @@ class PowerfoamScene(nn.Module):
             warmup_steps=2_000,
             max_steps=iterations,
         )
+        if self.use_sdf:
+            self.sdf_scheduler = get_cosine_scheduler(
+                args.sdf_lr_init,
+                args.sdf_lr_final,
+                max_steps=iterations,
+            )
+            self.variance_scheduler = get_cosine_scheduler(
+                args.variance_lr_init,
+                args.variance_lr_final,
+                max_steps=iterations,
+            )
 
     def update_learning_rate(self, iteration):
         """Learning rate scheduling per step"""
@@ -596,6 +694,12 @@ class PowerfoamScene(nn.Module):
                 param_group["lr"] = lr
             elif param_group["name"] == "texel_height":
                 lr = self.texel_height_scheduler(iteration)
+                param_group["lr"] = lr
+            elif param_group["name"] == "sdf_network":
+                lr = self.sdf_scheduler(iteration)
+                param_group["lr"] = lr
+            elif param_group["name"] == "inv_s":
+                lr = self.variance_scheduler(iteration)
                 param_group["lr"] = lr
 
     def update_stats(self, contrib, point_error, vis_mask):
@@ -659,6 +763,8 @@ class PowerfoamScene(nn.Module):
 
             optimizable_tensors = {}
             for group in self.optimizer.param_groups:
+                if group["name"] in NETWORK_PARAM_GROUPS:
+                    continue
                 stored_state = self.optimizer.state.get(group["params"][0], None)
                 if stored_state is not None:
                     stored_state["exp_avg"] = stored_state["exp_avg"][new_indices]
@@ -728,6 +834,9 @@ class PowerfoamScene(nn.Module):
             "adjacency": adjacency,
             "adjacency_offsets": adjacency_offsets,
         }
+        if self.use_sdf:
+            scene_data["sdf_network"] = self.sdf_network.state_dict()
+            scene_data["variance_net"] = self.variance_net.state_dict()
         torch.save(scene_data, pt_path)
 
     def load_pt(self, pt_path):
@@ -754,6 +863,15 @@ class PowerfoamScene(nn.Module):
 
         self.adjacency = scene_data["adjacency"].to(self.device)
         self.adjacency_offsets = scene_data["adjacency_offsets"].to(self.device)
+
+        if self.use_sdf:
+            if "sdf_network" not in scene_data:
+                raise ValueError(
+                    "use_sdf is enabled but the checkpoint contains no SDF "
+                    "network weights. Was this model trained with use_sdf?"
+                )
+            self.sdf_network.load_state_dict(scene_data["sdf_network"])
+            self.variance_net.load_state_dict(scene_data["variance_net"])
 
     def save_pc(self, ply_path):
         points = self.points.detach().float().cpu()

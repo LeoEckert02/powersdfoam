@@ -160,9 +160,22 @@ class RayTracer:
             prim_idx = start_point_idx
             pt_near = float(0.0)
 
+            # Safety cap on the cell-to-cell walk. Pass-through cells (not hit /
+            # sigma < 1e-3) advance prim_idx without changing log_t, so a cyclic
+            # adjacency walk never satisfies the transmittance/exit break and
+            # loops forever. A healthy ray crosses far fewer cells than this;
+            # bound it the same way the rasterizer bounds itself
+            # (max_intersections = 1024), so degenerate rays break promptly
+            # instead of grinding through the whole primitive set.
+            max_steps = int(1024)
+            step = int(0)
+
             while True:
                 trans = wp.exp(log_t)
                 if trans < transmittance_threshold or prim_idx == int(0x7FFFFFFF):
+                    break
+                step += 1
+                if step > max_steps:
                     break
 
                 sphere = all_spheres[prim_idx]

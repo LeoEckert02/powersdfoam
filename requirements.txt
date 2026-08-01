@@ -25,3 +25,7 @@ warp-lang==1.10.0
 imgui-bundle>=1.6.0
 glfw>=2.7.0
 PyOpenGL>=3.1.7
+
+# -- Mesh extraction (SDF marching cubes / power-cell extraction) -----------
+scikit-image==0.25.2
+trimesh==4.5.3

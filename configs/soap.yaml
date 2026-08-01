@@ -7,23 +7,24 @@ contribution_weight: 0.1
 interpenetration_weight: 1e-4
 
 # Dataset parameters
-dataset: "colmap"
-data_path: "data/dl3dv"
-scene: "indoor1"
-alpha_format_on_disk: "premultiplied"
-downsample: [4, 2]
+dataset: "blender"
+data_path: "/storage/user/eckertle/sss-gs/synthetic/soap"
+scene: "soap"
+alpha_format_on_disk: "straight"
+downsample: [2, 1]
 downsample_iterations: [0, 500]
 is_pinhole: true
 eval: true
 
 # Model parameters
 init_type: "sfm"
-init_points: 100_000
-final_points: 500_000
+init_points: 40_000
+final_points: 150_000
 bkgd_color: [0.0, 0.0, 0.0]
 render_objective: "volume"
 sv_dof: 8
 num_texel_sites: 8
+use_metric3d: true
 
 # Optimization parameters
 points_lr_init: 1e-3
