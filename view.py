@@ -10,8 +10,8 @@ import torch
 
 from configs import Params, add_group
 from data_loader import DataHandler
-from powerfoam.scene import PowerfoamScene
-from powerfoam.viewer import Viewer
+from powersdfoam.scene import PowerSDFoamScene
+from powersdfoam.viewer import Viewer
 
 
 def view(args, config_path):
@@ -25,7 +25,7 @@ def view(args, config_path):
     print(f"Loaded dataset: {args.scene}")
 
     # Initialize and load model
-    model = PowerfoamScene(args)
+    model = PowerSDFoamScene(args)
     model.initialize_from_dataset(data_handler, device="cuda")
     model.load_pt(f"{checkpoint}/model.pt")
     model.declare_optimizers(args, args.iterations)

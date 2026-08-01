@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import pycolmap
 import json
 
-from powerfoam.camera import TorchCamera
+from powersdfoam.camera import TorchCamera
 from .metric3D import Metric3DEstimator
 
 

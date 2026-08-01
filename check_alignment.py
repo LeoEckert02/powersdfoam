@@ -7,8 +7,8 @@ import open3d as o3d
 
 from configs import *
 from data_loader import DataHandler
-from powerfoam.scene import PowerfoamScene
-from powerfoam.camera import TorchCamera
+from powersdfoam.scene import PowerSDFoamScene
+from powersdfoam.camera import TorchCamera
 from render import to_cam_open3d  # reuse intrinsics/extrinsics conversion
 import warp as wp
 
@@ -71,7 +71,7 @@ def main():
     test_data_handler = DataHandler(params)
     test_data_handler.reload('test', downsample=params.downsample[-1])
 
-    model = PowerfoamScene(params)
+    model = PowerSDFoamScene(params)
     model.initialize_from_dataset(test_data_handler, device='cuda')
     checkpoint = args.config.replace('/config.yaml', '')
     model.load_pt(f"{checkpoint}/model.pt")

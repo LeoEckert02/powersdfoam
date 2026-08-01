@@ -4,7 +4,7 @@ import numpy as np
 import configargparse
 
 from configs import *
-from powerfoam.mesh_extractor import MeshExtractor
+from powersdfoam.mesh_extractor import MeshExtractor
 
 seed = 0
 torch.random.manual_seed(seed)

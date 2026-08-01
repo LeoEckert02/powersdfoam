@@ -12,8 +12,8 @@ import warp as wp
 
 from configs import *
 from data_loader import DataHandler
-from powerfoam.scene import PowerfoamScene
-from powerfoam.metrics import psnr, ssim_eval, lpips_eval
+from powersdfoam.scene import PowerSDFoamScene
+from powersdfoam.metrics import psnr, ssim_eval, lpips_eval
 
 
 seed = 0
@@ -31,7 +31,7 @@ def test(args, config_path):
     test_data_handler.reload("test", downsample=args.downsample[-1])
 
     # Setting up model
-    model = PowerfoamScene(args)
+    model = PowerSDFoamScene(args)
     model.initialize_from_dataset(test_data_handler, device="cuda")
     model.load_pt(f"{checkpoint}/model.pt")
 
